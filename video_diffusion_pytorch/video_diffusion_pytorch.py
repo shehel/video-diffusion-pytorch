@@ -21,7 +21,40 @@ from rotary_embedding_torch import RotaryEmbedding
 
 from video_diffusion_pytorch.text import tokenize, bert_embed, BERT_MODEL_DIM
 
+from typing import Any
+from typing import Callable
+from typing import Optional
+from typing import Tuple
+from typing import Union
+import h5py
+import numpy as np
+import matplotlib.animation as animation
+import matplotlib.pyplot as plt
+import pdb
 # helpers functions
+
+def load_h5_file(file_path: Union[str, Path], sl: Optional[slice] = None, to_torch: bool = False) -> np.ndarray:
+    """Given a file path to an h5 file assumed to house a tensor, load that
+    tensor into memory and return a pointer.
+    Parameters
+    ----------
+    file_path: str
+        h5 file to load
+    sl: Optional[slice]
+        slice to load (data is written in chunks for faster access to rows).
+    """
+    # load
+    with h5py.File(str(file_path) if isinstance(file_path, Path) else file_path, "r") as fr:
+        data = fr.get("array")
+        if sl is not None:
+            data = np.array(data[sl])
+        else:
+            data = np.array(data)
+        if to_torch:
+            data = torch.from_numpy(data)
+            data = data.to(dtype=torch.float)
+        return data
+
 
 def exists(x):
     return x is not None
@@ -340,7 +373,7 @@ class Unet3D(nn.Module):
         cond_dim = None,
         out_dim = None,
         dim_mults=(1, 2, 4, 8),
-        channels = 3,
+        channels = 8,
         attn_heads = 8,
         attn_dim_head = 32,
         use_bert_text_cond = False,
@@ -546,7 +579,7 @@ class GaussianDiffusion(nn.Module):
         image_size,
         num_frames,
         text_use_bert_cls = False,
-        channels = 3,
+        channels = 8,
         timesteps = 1000,
         loss_type = 'l1'
     ):
@@ -768,39 +801,123 @@ def cast_num_frames(t, *, frames):
 
     return F.pad(t, (0, 0, 0, 0, 0, frames - f))
 
-class Dataset(data.Dataset):
+
+MAX_TEST_SLOT_INDEX = 240
+class T4CDataset(data.Dataset):
     def __init__(
         self,
-        folder,
-        image_size,
-        channels = 3,
-        num_frames = 16,
-        horizontal_flip = False,
-        force_num_frames = True,
-        exts = ['gif']
+        root_dir: str,
+            file_filter: str = None,
+            im_size = 64
     ):
-        super().__init__()
-        self.folder = folder
-        self.image_size = image_size
-        self.channels = channels
-        self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+        """torch dataset from training data.
+        Parameters
+        ----------
+        root_dir
+            data root folder, by convention should be `data/raw`, see `data/README.md`. All `**/training/*8ch.h5` will be added to the dataset.
+        file_filter: str
+            filter files under `root_dir`, defaults to `"**/training/*ch8.h5`
+        limit
+            truncate dataset size
+        transform
+            transform applied to both the input and label
+        """
+        self.root_dir = root_dir
+        self.im_size = im_size
+        self.files = []
+        self.file_filter = file_filter
+        if self.file_filter is None:
+            self.file_filter = "**/training/*8ch.h5"
+            #"MOSCOW/training/2019*.h5"#
 
-        self.cast_num_frames_fn = partial(cast_num_frames, frames = num_frames) if force_num_frames else identity
+        self.len = 0
+        self.file_list = None
+        self.use_npy = False
+        self._load_dataset()
 
-        self.transform = T.Compose([
-            T.Resize(image_size),
-            T.RandomHorizontalFlip() if horizontal_flip else T.Lambda(identity),
-            T.CenterCrop(image_size),
-            T.ToTensor()
-        ])
+    def _load_dataset(self):
+        self.file_list = list(Path(self.root_dir).rglob(self.file_filter))
+
+        self.file_list.sort()
+        self.len = len(self.file_list) * MAX_TEST_SLOT_INDEX
+
+    def _load_h5_file(self, fn, sl: Optional[slice]):
+        if self.use_npy:
+            return np.load(fn)
+        else:
+            return load_h5_file(fn, sl=sl)
 
     def __len__(self):
-        return len(self.paths)
 
-    def __getitem__(self, index):
-        path = self.paths[index]
-        tensor = gif_to_tensor(path, self.channels, transform = self.transform)
-        return self.cast_num_frames_fn(tensor)
+        return self.len
+
+
+    def __getitem__(self, idx: int) -> Tuple[Any, Any]:
+        if idx > self.__len__():
+            raise IndexError("Index out of bounds")
+
+        file_idx = idx // MAX_TEST_SLOT_INDEX
+        start_hour = idx % MAX_TEST_SLOT_INDEX
+        two_hours = self._load_h5_file(self.file_list[file_idx], sl=slice(start_hour, start_hour + 12 * 2 + 1))
+        #two_hours = self.files[file_idx][start_hour:start_hour+24]
+
+        #input_data, output_data = prepare_test(two_hours)
+        input_data, output_data = two_hours[6:12], two_hours[12:18]
+
+        input_data = input_data[:,100:100+self.im_size, 100:100+self.im_size, :]
+        output_data = output_data[:,100:100+self.im_size, 100:100+self.im_size, :]
+        input_data = np.divide(input_data, 255.0) # bring the upper range to 1
+        output_data = np.divide(output_data, 255.0) # bring the upper range to 1
+        input_data = 2*input_data - 1
+        output_data = 2*output_data - 1
+        return input_data, output_data
+
+def train_collate_fn(batch):
+    dynamic_input_batch, target_batch = zip(*batch)
+    dynamic_input_batch = np.stack(dynamic_input_batch, axis=0)
+    target_batch = np.stack(target_batch, axis=0)
+    dynamic_input_batch = np.moveaxis(dynamic_input_batch, source=4, destination=1)
+    dynamic_input_batch = torch.from_numpy(dynamic_input_batch).float()
+    target_batch = np.moveaxis(target_batch, source=4, destination=1)
+    target_batch = torch.from_numpy(target_batch).float()
+
+    return dynamic_input_batch, target_batch
+
+
+
+# class Dataset(data.Dataset):
+#     def __init__(
+#         self,
+#         folder,
+#         image_size,
+#         channels = 3,
+#         num_frames = 16,
+#         horizontal_flip = False,
+#         force_num_frames = True,
+#         exts = ['gif']
+#     ):
+#         super().__init__()
+#         self.folder = folder
+#         self.image_size = image_size
+#         self.channels = channels
+#         self.paths = [p for ext in exts for p in Path(f'{folder}').glob(f'**/*.{ext}')]
+
+#         self.cast_num_frames_fn = partial(cast_num_frames, frames = num_frames) if force_num_frames else identity
+
+#         self.transform = T.Compose([
+#             T.Resize(image_size),
+#             T.RandomHorizontalFlip() if horizontal_flip else T.Lambda(identity),
+#             T.CenterCrop(image_size),
+#             T.ToTensor()
+#         ])
+
+#     def __len__(self):
+#         return len(self.paths)
+
+#     def __getitem__(self, index):
+#         path = self.paths[index]
+#         tensor = gif_to_tensor(path, self.channels, transform = self.transform)
+#         return self.cast_num_frames_fn(tensor)
 
 # trainer class
 
@@ -812,7 +929,7 @@ class Trainer(object):
         *,
         ema_decay = 0.995,
         num_frames = 16,
-        train_batch_size = 32,
+        train_batch_size = 8,
         train_lr = 2e-5,
         train_num_steps = 100000,
         gradient_accumulate_every = 2,
@@ -821,8 +938,9 @@ class Trainer(object):
         update_ema_every = 10,
         save_and_sample_every = 1000,
         results_folder = './results',
-        num_sample_rows = 4,
-        max_grad_norm = None
+        num_samples = 2,
+        max_grad_norm = None,
+        im_size = 64
     ):
         super().__init__()
         self.model = diffusion_model
@@ -842,12 +960,13 @@ class Trainer(object):
         channels = diffusion_model.channels
         num_frames = diffusion_model.num_frames
 
-        self.ds = Dataset(folder, image_size, channels = channels, num_frames = num_frames)
+        self.ds = T4CDataset(folder, im_size=im_size)
 
         print(f'found {len(self.ds)} videos as gif files at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True))
+        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True, collate_fn=train_collate_fn))
+
         self.opt = Adam(diffusion_model.parameters(), lr = train_lr)
 
         self.step = 0
@@ -856,7 +975,7 @@ class Trainer(object):
         self.scaler = GradScaler(enabled = amp)
         self.max_grad_norm = max_grad_norm
 
-        self.num_sample_rows = num_sample_rows
+        self.num_samples = num_samples
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True, parents = True)
 
@@ -903,11 +1022,12 @@ class Trainer(object):
 
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
-                data = next(self.dl).cuda()
+                #data = next(self.dl).cuda()
+                _, target = next(self.dl)
 
                 with autocast(enabled = self.amp):
                     loss = self.model(
-                        data,
+                        target.cuda(),
                         prob_focus_present = prob_focus_present,
                         focus_present_mask = focus_present_mask
                     )
@@ -931,18 +1051,28 @@ class Trainer(object):
 
             if self.step != 0 and self.step % self.save_and_sample_every == 0:
                 milestone = self.step // self.save_and_sample_every
-                num_samples = self.num_sample_rows ** 2
+                num_samples = self.num_samples
                 batches = num_to_groups(num_samples, self.batch_size)
 
                 all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
-                all_videos_list = torch.cat(all_videos_list, dim = 0)
+                all_videos_list = all_videos_list[0]
+                for x in range(all_videos_list.shape[0]):
+                    all_images = (all_videos_list[x] + 1) * 0.5
+                    all_images = all_images.cpu().detach().numpy()
+                    fig, ax = plt.subplots(figsize=(8, 8))
+                    imgs = []
+                    for img in (all_images[0, :,:,:]):
+                        if hasattr(img, "numpy"):
+                            img = img.numpy()
 
-                all_videos_list = F.pad(all_videos_list, (2, 2, 2, 2))
+                        img = ax.imshow(img, animated=True)
+                        imgs.append([img])
 
-                one_gif = rearrange(all_videos_list, '(i j) c f h w -> c f (i h) (j w)', i = self.num_sample_rows)
-                video_path = str(self.results_folder / str(f'{milestone}.gif'))
-                video_tensor_to_gif(one_gif, video_path)
-                log = {**log, 'sample': video_path}
+                    ani = animation.ArtistAnimation(fig, imgs, interval=200, blit=True, repeat_delay=100)
+                    #if file is not None:
+                    ani.save(str(self.results_folder / f'sample-{x}.gif'))
+
+                pdb.set_trace()
                 self.save(milestone)
 
             log_fn(log)
