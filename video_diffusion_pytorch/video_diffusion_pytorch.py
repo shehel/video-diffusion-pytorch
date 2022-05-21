@@ -505,7 +505,7 @@ class Unet3D(nn.Module):
         assert not (self.has_cond and not exists(cond)), 'cond must be passed in if cond_dim specified'
         batch, device = x.shape[0], x.device
 
-        if cond:
+        if cond is not None:
             x = torch.cat((cond, x), 2)
 
         focus_present_mask = default(focus_present_mask, lambda: prob_mask_like((batch,), prob_focus_present, device = device))
@@ -548,7 +548,7 @@ class Unet3D(nn.Module):
             x = upsample(x)
 
         x = self.final_conv(x)
-        if cond:
+        if cond is not None:
             return x[:,:,6:,:,:]
         else:
             return x
@@ -927,7 +927,7 @@ def train_collate_fn(batch):
 
 # trainer class
 
-class Trainer(object):
+class Trainer(object) is not None:
     def __init__(
         self,
         diffusion_model,

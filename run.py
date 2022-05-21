@@ -8,7 +8,7 @@ logger = task.get_logger()
 args = {
     'im_size': 128,
     'batch_size': 4,
-    'train_lr': 4,
+    'train_lr': 1e-4,
     'save_sample_every': 1000,
     'train_steps': 700000,
     'num_workers': 2,
@@ -21,7 +21,8 @@ args = {
     'load_model': None,
     'dim': 64,
     'dim_mults': (1,2,2,2),
-    'cond': True
+    'cond': True,
+    'grad_accum': 2
     }
 
 task.connect(args)
@@ -46,7 +47,7 @@ trainer = Trainer(
     train_lr = args['train_lr'],
     save_and_sample_every = args['save_sample_every'],
     train_num_steps = args['train_steps'],         # total training steps
-    gradient_accumulate_every = 2,    # gradient accumulation steps
+    gradient_accumulate_every = args['grad_accum'],    # gradient accumulation steps
     ema_decay = 0.995,                # exponential moving average decay
     amp = args['amp'],
     im_size = args['im_size'],
