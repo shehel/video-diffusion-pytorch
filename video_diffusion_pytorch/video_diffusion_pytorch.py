@@ -505,8 +505,10 @@ class Unet3D(nn.Module):
         assert not (self.has_cond and not exists(cond)), 'cond must be passed in if cond_dim specified'
         batch, device = x.shape[0], x.device
 
-        focus_present_mask = default(focus_present_mask, lambda: prob_mask_like((batch,), prob_focus_present, device = device))
+        if cond:
+            x = torch.cat((cond, x), 2)
 
+        focus_present_mask = default(focus_present_mask, lambda: prob_mask_like((batch,), prob_focus_present, device = device))
         time_rel_pos_bias = self.time_rel_pos_bias(x.shape[2], device = x.device)
 
         x = self.init_conv(x)
@@ -545,7 +547,11 @@ class Unet3D(nn.Module):
             x = temporal_attn(x, pos_bias = time_rel_pos_bias, focus_present_mask = focus_present_mask)
             x = upsample(x)
 
-        return self.final_conv(x)
+        x = self.final_conv(x)
+        if cond:
+            return x[:,:,6:,:,:]
+        else:
+            return x
 
 # gaussian diffusion trainer class
 
@@ -827,7 +833,7 @@ class T4CDataset(data.Dataset):
         self.files = []
         self.file_filter = file_filter
         if self.file_filter is None:
-            self.file_filter = "**/training/*8ch.h5"
+            self.file_filter = "MOSCOW/training/*8ch.h5"
             #"MOSCOW/training/2019*.h5"#
 
         self.len = 0
@@ -940,7 +946,9 @@ class Trainer(object):
         results_folder = './results',
         num_samples = 2,
         max_grad_norm = None,
-        im_size = 64
+            im_size = 64,
+            cond = True
+
     ):
         super().__init__()
         self.model = diffusion_model
@@ -978,6 +986,7 @@ class Trainer(object):
         self.num_samples = num_samples
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True, parents = True)
+        self.cond = cond
 
         self.reset_parameters()
 
@@ -1016,21 +1025,33 @@ class Trainer(object):
         self,
         prob_focus_present = 0.,
         focus_present_mask = None,
-        log_fn = noop
+            log_fn = noop,
+        logger = None
     ):
         assert callable(log_fn)
 
         while self.step < self.train_num_steps:
             for i in range(self.gradient_accumulate_every):
                 #data = next(self.dl).cuda()
-                _, target = next(self.dl)
+                if self.cond:
+                    cond, target = next(self.dl)
+                else:
+                    _, target = next(self.dl)
 
                 with autocast(enabled = self.amp):
-                    loss = self.model(
+                    if self.cond:
+                        loss = self.model(
                         target.cuda(),
                         prob_focus_present = prob_focus_present,
-                        focus_present_mask = focus_present_mask
-                    )
+                        focus_present_mask = focus_present_mask,
+                        cond = cond.cuda()
+                        )
+                    else:
+                        loss = self.model(
+                        target.cuda(),
+                        prob_focus_present = prob_focus_present,
+                        focus_present_mask = focus_present_mask,
+                        )
 
                     self.scaler.scale(loss / self.gradient_accumulate_every).backward()
 
@@ -1054,7 +1075,10 @@ class Trainer(object):
                 num_samples = self.num_samples
                 batches = num_to_groups(num_samples, self.batch_size)
 
-                all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
+                if self.cond:
+                    all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n, cond=cond.cuda()), batches))
+                else:
+                    all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
                 all_videos_list = all_videos_list[0]
                 for x in range(all_videos_list.shape[0]):
                     all_images = (all_videos_list[x] + 1) * 0.5
@@ -1070,9 +1094,11 @@ class Trainer(object):
 
                     ani = animation.ArtistAnimation(fig, imgs, interval=200, blit=True, repeat_delay=100)
                     #if file is not None:
-                    ani.save(str(self.results_folder / f'sample-{x}.gif'))
+                    logger.current_logger().report_media(
+                        "Viz", str(x), iteration=milestone, stream=ani.to_html5_video(), file_extension='html')
 
-                pdb.set_trace()
+                    #ani.save(str(self.results_folder / f'sample-{milestone}-{x}.gif'))
+
                 self.save(milestone)
 
             log_fn(log)
