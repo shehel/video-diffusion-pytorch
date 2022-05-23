@@ -381,10 +381,22 @@ class Unet3D(nn.Module):
         init_kernel_size = 7,
         use_sparse_linear_attn = True,
         block_type = 'resnet',
-        resnet_groups = 8
+            resnet_groups = 8,
+            t_start = 6,
+            t_end = 12,
+            ch_start = 0,
+            ch_end = 2
+
     ):
         super().__init__()
         self.channels = channels
+
+        # time and channel boundaries
+        self.t_start = t_start
+        self.t_end = t_end
+        self.ch_start = ch_start
+        self.ch_end = ch_end
+
 
         # temporal attention and its relative positional encoding
 
@@ -548,10 +560,8 @@ class Unet3D(nn.Module):
             x = upsample(x)
 
         x = self.final_conv(x)
-        if cond is not None:
-            return x[:,:,6:,:,:]
-        else:
-            return x
+        return x[:,:, self.t_start:self.t_end,:,:]
+
 
 # gaussian diffusion trainer class
 
@@ -587,8 +597,8 @@ class GaussianDiffusion(nn.Module):
         text_use_bert_cls = False,
         channels = 8,
         timesteps = 1000,
-        loss_type = 'l1'
-    ):
+            loss_type = 'l1',
+                ):
         super().__init__()
         self.channels = channels
         self.image_size = image_size
@@ -604,6 +614,7 @@ class GaussianDiffusion(nn.Module):
         timesteps, = betas.shape
         self.num_timesteps = int(timesteps)
         self.loss_type = loss_type
+
 
         # register buffer helper function that casts float64 to float32
 
@@ -814,7 +825,11 @@ class T4CDataset(data.Dataset):
         self,
         root_dir: str,
             file_filter: str = None,
-            im_size = 64
+            im_size = 64,
+            in_frames = [6,7,8,9,10,11],
+            out_frames = [12,13,14,15,16,17],
+            ch_start = 0,
+            ch_end = 1
     ):
         """torch dataset from training data.
         Parameters
@@ -835,6 +850,16 @@ class T4CDataset(data.Dataset):
         if self.file_filter is None:
             self.file_filter = "MOSCOW/training/*8ch.h5"
             #"MOSCOW/training/2019*.h5"#
+
+        self.in_frames = in_frames
+        self.out_frames = out_frames
+        if self.in_frames is None:
+            self.in_frames = [6,7,8,9,10,11]
+        if self.out_frames is None:
+            self.out_frames = [12,13,14,15,16,17]
+        self.ch_start = ch_start
+        self.ch_end = ch_end
+
 
         self.len = 0
         self.file_list = None
@@ -868,10 +893,10 @@ class T4CDataset(data.Dataset):
         #two_hours = self.files[file_idx][start_hour:start_hour+24]
 
         #input_data, output_data = prepare_test(two_hours)
-        input_data, output_data = two_hours[6:12], two_hours[12:18]
+        input_data, output_data = two_hours[self.in_frames], two_hours[self.out_frames]
 
-        input_data = input_data[:,100:100+self.im_size, 100:100+self.im_size, :]
-        output_data = output_data[:,100:100+self.im_size, 100:100+self.im_size, :]
+        input_data = input_data[:,100:100+self.im_size, 100:100+self.im_size, self.ch_start::self.ch_end]
+        output_data = output_data[:,100:100+self.im_size, 100:100+self.im_size,self.ch_start::self.ch_end]
         input_data = np.divide(input_data, 255.0) # bring the upper range to 1
         output_data = np.divide(output_data, 255.0) # bring the upper range to 1
         input_data = 2*input_data - 1
@@ -927,7 +952,7 @@ def train_collate_fn(batch):
 
 # trainer class
 
-class Trainer(object) is not None:
+class Trainer(object):
     def __init__(
         self,
         diffusion_model,
@@ -946,8 +971,13 @@ class Trainer(object) is not None:
         results_folder = './results',
         num_samples = 2,
         max_grad_norm = None,
-            im_size = 64,
-            cond = True
+        im_size = 64,
+            cond = True,
+            in_frames = None,
+            out_frames = None,
+           ch_start = 0,
+            ch_end = 1,
+            file_filter = None
 
     ):
         super().__init__()
@@ -968,7 +998,8 @@ class Trainer(object) is not None:
         channels = diffusion_model.channels
         num_frames = diffusion_model.num_frames
 
-        self.ds = T4CDataset(folder, im_size=im_size)
+        self.ds = T4CDataset(folder, im_size=im_size, file_filter = file_filter, in_frames = in_frames, out_frames=out_frames,
+                             ch_start = ch_start, ch_end = ch_end)
 
         print(f'found {len(self.ds)} videos as gif files at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
@@ -987,6 +1018,10 @@ class Trainer(object) is not None:
         self.results_folder = Path(results_folder)
         self.results_folder.mkdir(exist_ok = True, parents = True)
         self.cond = cond
+
+        self.ch_start = ch_start
+        self.ch_end = ch_end
+
 
         self.reset_parameters()
 
@@ -1077,29 +1112,43 @@ class Trainer(object) is not None:
 
                 if self.cond:
                     all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n, cond=cond.cuda()), batches))
+                    cond = cond.cpu().detach().numpy()
                 else:
                     all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
-                all_videos_list = all_videos_list[0]
-                for x in range(all_videos_list.shape[0]):
-                    all_images = (all_videos_list[x] + 1) * 0.5
-                    all_images = all_images.cpu().detach().numpy()
-                    fig, ax = plt.subplots(figsize=(8, 8))
-                    imgs = []
-                    for img in (all_images[0, :,:,:]):
-                        if hasattr(img, "numpy"):
-                            img = img.numpy()
 
-                        img = ax.imshow(img, animated=True)
-                        imgs.append([img])
+                for list_id in range(len(all_videos_list)):
+                    all_images = all_videos_list[list_id].cpu().detach().numpy()
+                    all_images = (all_images + 1) * 0.5 # de-normalize
+                    for sample in range(all_images.shape[0]):
+                        for direction in range(4):
+                            imgs = []
+                            fig, ax = plt.subplots(figsize=(8, 8))
+                            for img in (all_images[sample, direction,:,:,:]):
+                                img = ax.imshow(img, animated=True)
+                                imgs.append([img])
 
-                    ani = animation.ArtistAnimation(fig, imgs, interval=200, blit=True, repeat_delay=100)
-                    #if file is not None:
-                    logger.current_logger().report_media(
-                        "Viz", str(x), iteration=milestone, stream=ani.to_html5_video(), file_extension='html')
+                            ani = animation.ArtistAnimation(fig, imgs, interval=1000, blit=True, repeat_delay=2000)
+                            #if file is not None:
+                            logger.current_logger().report_media(
+                                "Sample"+str(list_id)+"-"+str(sample), str(direction), iteration=milestone, stream=ani.to_html5_video(), file_extension='html')
 
-                    #ani.save(str(self.results_folder / f'sample-{milestone}-{x}.gif'))
+                            if self.cond:
+                                imgs = []
+                                fig, ax = plt.subplots(figsize=(8, 8))
+                                for img in (cond[sample, direction,:,:,:]):
+                                    img = ax.imshow(img, animated=True)
+                                    imgs.append([img])
+
+                                ani = animation.ArtistAnimation(fig, imgs, interval=1000, blit=True, repeat_delay=2000)
+                                #if file is not None:
+                                logger.current_logger().report_media(
+                                    "Sample"+str(list_id)+"-"+str(sample), "cond"+str(direction), iteration=milestone, stream=ani.to_html5_video(), file_extension='html')
+
+
+                        #ani.save(str(self.results_folder / f'sample-{milestone}-{x}.gif'))
 
                 self.save(milestone)
+                #task.upload_artifact(name='model_checkpoint', artifact_object=checkpoints_dir)
 
             log_fn(log)
             self.step += 1

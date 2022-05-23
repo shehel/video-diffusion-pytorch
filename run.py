@@ -6,23 +6,30 @@ from clearml import Task
 task = Task.init(project_name="t4c_gen", task_name="Train diffusion")
 logger = task.get_logger()
 args = {
-    'im_size': 128,
-    'batch_size': 4,
+    'im_size': 64,
+    'batch_size': 1,
     'train_lr': 1e-4,
-    'save_sample_every': 1000,
+    'save_sample_every': 5,
     'train_steps': 700000,
-    'num_workers': 2,
+    'num_workers': 0,
     'data': '../NeurIPS2021-traffic4cast/data/raw/',
-    'num_channels': 8,
+    'channels': 8,
     'num_frames': 6,
-    'timesteps': 1000,
+    'timesteps': 10,
     'loss_type': 'l2',
-    'amp': False,
+    'amp': True,
     'load_model': None,
     'dim': 64,
-    'dim_mults': (1,2,2,2),
+    'dim_mults': (1,2,4,8),
     'cond': True,
-    'grad_accum': 2
+    'grad_accum': 2,
+    't_start': 6,
+    't_end': 12,
+    'ch_start': 0,
+    'ch_end': 1,
+    'in_frames': None,
+    'out_frames': None,
+    'file_filter': None
     }
 
 task.connect(args)
@@ -31,14 +38,21 @@ print ('Arguments: {}'.format(args))
 model = Unet3D(
     dim = args['dim'],
     dim_mults = args['dim_mults'],
+    ch_start = args['ch_start'],
+    ch_end = args['ch_end'],
+    t_start = args['t_start'],
+    t_end = args['t_end'],
+    channels = args['channels']
+
 )
 diffusion = GaussianDiffusion(
     model,
     image_size = args['im_size'],
     num_frames = args['num_frames'],
     timesteps = args['timesteps'],   # number of steps
-    loss_type = args['loss_type']    # L1 or L2
-).cuda()
+    loss_type = args['loss_type'],    # L1 or L2
+    channels = args['channels'],
+    ).cuda()
 
 trainer = Trainer(
     diffusion,
@@ -51,7 +65,12 @@ trainer = Trainer(
     ema_decay = 0.995,                # exponential moving average decay
     amp = args['amp'],
     im_size = args['im_size'],
-    cond = args['cond']
+    cond = args['cond'],
+    in_frames = args['in_frames'],
+    out_frames = args['out_frames'],
+    ch_start = args['ch_start'],
+    ch_end = args['ch_end'],
+    file_filter = args['file_filter']
 )
 
 if args['load_model'] is not None:
