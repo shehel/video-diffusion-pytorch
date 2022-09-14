@@ -668,7 +668,7 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, t, clip_denoised: bool, cond = None, cond_scale = 1.):
-        x_recon = self.predict_start_from_noise(x, t=t, noise = self.denoise_fn.forward_with_cond_scale(x, t, cond = cond, cond_scale = cond_scale))
+        x_recon = self.predict_start_from_noise(x, t=t, noise = self.denoise_fn.module.forward_with_cond_scale(x, t, cond = cond, cond_scale = cond_scale))
 
         if clip_denoised:
             x_recon.clamp_(-1., 1.)
@@ -848,7 +848,7 @@ class T4CDataset(data.Dataset):
         self.files = []
         self.file_filter = file_filter
         if self.file_filter is None:
-            self.file_filter = "MOSCOW/training/*8ch.h5"
+            self.file_filter = "BERLIN/training/*8ch.h5"
             #"MOSCOW/training/2019*.h5"#
 
         self.in_frames = in_frames
@@ -895,8 +895,8 @@ class T4CDataset(data.Dataset):
         #input_data, output_data = prepare_test(two_hours)
         input_data, output_data = two_hours[self.in_frames], two_hours[self.out_frames]
 
-        input_data = input_data[:,100:100+self.im_size, 100:100+self.im_size, self.ch_start::self.ch_end]
-        output_data = output_data[:,100:100+self.im_size, 100:100+self.im_size,self.ch_start::self.ch_end]
+        input_data = input_data[:,295:295+self.im_size, 100:100+self.im_size, self.ch_start:self.ch_end]
+        output_data = output_data[:,295:295+self.im_size, 100:100+self.im_size,self.ch_start:self.ch_end]
         input_data = np.divide(input_data, 255.0) # bring the upper range to 1
         output_data = np.divide(output_data, 255.0) # bring the upper range to 1
         input_data = 2*input_data - 1
@@ -1004,7 +1004,7 @@ class Trainer(object):
         print(f'found {len(self.ds)} videos as gif files at {folder}')
         assert len(self.ds) > 0, 'need to have at least 1 video to start training (although 1 is not great, try 100k)'
 
-        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True, collate_fn=train_collate_fn))
+        self.dl = cycle(data.DataLoader(self.ds, batch_size = train_batch_size, shuffle=True, pin_memory=True, collate_fn=train_collate_fn, num_workers=4))
 
         self.opt = Adam(diffusion_model.parameters(), lr = train_lr)
 
@@ -1089,8 +1089,11 @@ class Trainer(object):
                         )
 
                     self.scaler.scale(loss / self.gradient_accumulate_every).backward()
+                logger.report_scalar(
+                    title='Loss', series='series', value=loss.item(), iteration=self.step
+                )
 
-                print(f'{self.step}: {loss.item()}')
+                #print(f'{self.step}: {loss.item()}')
 
             log = {'loss': loss.item()}
 
@@ -1120,7 +1123,7 @@ class Trainer(object):
                     all_images = all_videos_list[list_id].cpu().detach().numpy()
                     all_images = (all_images + 1) * 0.5 # de-normalize
                     for sample in range(all_images.shape[0]):
-                        for direction in range(4):
+                        for direction in range(1):
                             imgs = []
                             fig, ax = plt.subplots(figsize=(8, 8))
                             for img in (all_images[sample, direction,:,:,:]):

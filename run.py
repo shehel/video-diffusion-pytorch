@@ -6,16 +6,16 @@ from clearml import Task
 task = Task.init(project_name="t4c_gen", task_name="Train diffusion")
 logger = task.get_logger()
 args = {
-    'im_size': 64,
-    'batch_size': 1,
+    'im_size': 128,
+    'batch_size': 4,
     'train_lr': 1e-4,
     'save_sample_every': 5,
     'train_steps': 700000,
     'num_workers': 0,
-    'data': '../NeurIPS2021-traffic4cast/data/raw/',
-    'channels': 8,
+    'data': '/data/raw/',
+    'channels': 1,
     'num_frames': 6,
-    'timesteps': 10,
+    'timesteps': 500,
     'loss_type': 'l2',
     'amp': True,
     'load_model': None,
@@ -25,8 +25,8 @@ args = {
     'grad_accum': 2,
     't_start': 6,
     't_end': 12,
-    'ch_start': 0,
-    'ch_end': 1,
+    'ch_start': 1,
+    'ch_end': 2,
     'in_frames': None,
     'out_frames': None,
     'file_filter': None
@@ -45,6 +45,8 @@ model = Unet3D(
     channels = args['channels']
 
 )
+
+model = torch.nn.DataParallel(model)
 diffusion = GaussianDiffusion(
     model,
     image_size = args['im_size'],
