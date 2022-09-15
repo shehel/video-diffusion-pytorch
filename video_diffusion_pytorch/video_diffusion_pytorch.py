@@ -33,6 +33,12 @@ import matplotlib.pyplot as plt
 import pdb
 # helpers functions
 
+import torchvision
+from torchvision.io import read_image
+from torchvision.utils import make_grid
+from PIL import Image
+import PIL
+
 def load_h5_file(file_path: Union[str, Path], sl: Optional[slice] = None, to_torch: bool = False) -> np.ndarray:
     """Given a file path to an h5 file assumed to house a tensor, load that
     tensor into memory and return a pointer.
@@ -522,8 +528,9 @@ class Unet3D(nn.Module):
 
         focus_present_mask = default(focus_present_mask, lambda: prob_mask_like((batch,), prob_focus_present, device = device))
         time_rel_pos_bias = self.time_rel_pos_bias(x.shape[2], device = x.device)
-
+        pdb.set_trace()
         x = self.init_conv(x)
+
         x = self.init_temporal_attn(x, pos_bias = time_rel_pos_bias)
 
         t = self.time_mlp(time) if exists(self.time_mlp) else None
@@ -683,6 +690,7 @@ class GaussianDiffusion(nn.Module):
         noise = noise_like(x.shape, device, repeat_noise)
         # no noise when t == 0
         nonzero_mask = (1 - (t == 0).float()).reshape(b, *((1,) * (len(x.shape) - 1)))
+        #pdb.set_trace()
         return model_mean + nonzero_mask * (0.5 * model_log_variance).exp() * noise
 
     @torch.inference_mode()
@@ -695,6 +703,19 @@ class GaussianDiffusion(nn.Module):
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long), cond = cond, cond_scale = cond_scale)
 
+            img_ = (img + 1) * 0.5 # de-normalize
+            #img_ = img
+            grid = make_grid([img_[0,0,0:1,:,:],img_[0,0,1:2,:,:],img_[0,0,2:3,:,:],
+                              img_[0,0,3:4,:,:],img_[0,0,4:5,:,:],img_[0,0,5:,:,:],])
+
+  
+            # display result
+            img_g = torchvision.transforms.ToPILImage()(grid)
+            plt.imsave(f'samples/{i}-sample.png', img_g, cmap='viridis',)
+                       #vmin=0, vmax=1)
+
+            #img_g.save(f'samples/{i}-sample.png')
+            #img.save('test.png')
         return unnormalize_img(img)
 
     @torch.inference_mode()
@@ -969,7 +990,7 @@ class Trainer(object):
         update_ema_every = 10,
         save_and_sample_every = 1000,
         results_folder = './results',
-        num_samples = 2,
+        num_samples = 1,
         max_grad_norm = None,
         im_size = 64,
             cond = True,
@@ -1157,3 +1178,57 @@ class Trainer(object):
             self.step += 1
 
         print('training completed')
+
+    def infer(
+        self,
+        prob_focus_present = 0.,
+        focus_present_mask = None,
+            log_fn = noop,
+            logger = None,
+            milestone = None
+    ):
+        assert callable(log_fn)
+
+        self.model.eval()
+
+        if self.cond:
+            cond, target = next(self.dl)
+        else:
+            _, target = next(self.dl)
+
+        num_samples = self.num_samples
+        batches = num_to_groups(num_samples, self.batch_size)
+
+        if self.cond:
+            all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n, cond=cond.cuda()), batches))
+            cond = cond.cpu().detach().numpy()
+        else:
+            all_videos_list = list(map(lambda n: self.ema_model.sample(batch_size=n), batches))
+
+        for list_id in range(len(all_videos_list)):
+            all_images = all_videos_list[list_id].cpu().detach().numpy()
+            all_images = (all_images + 1) * 0.5 # de-normalize
+            for sample in range(all_images.shape[0]):
+                for direction in range(1):
+                    imgs = []
+                    fig, ax = plt.subplots(figsize=(8, 8))
+                    for img in (all_images[sample, direction,:,:,:]):
+                        img = ax.imshow(img, animated=True)
+                        imgs.append([img])
+
+                    ani = animation.ArtistAnimation(fig, imgs, interval=1000, blit=True, repeat_delay=2000)
+                    #if file is not None:
+                    logger.current_logger().report_media(
+                        "Sample"+str(list_id)+"-"+str(sample), str(direction), iteration=milestone, stream=ani.to_html5_video(), file_extension='html')
+
+                    if self.cond:
+                        imgs = []
+                        fig, ax = plt.subplots(figsize=(8, 8))
+                        for img in (cond[sample, direction,:,:,:]):
+                            img = ax.imshow(img, animated=True)
+                            imgs.append([img])
+
+                        ani = animation.ArtistAnimation(fig, imgs, interval=1000, blit=True, repeat_delay=2000)
+                        #if file is not None:
+                        logger.current_logger().report_media(
+                            "Sample"+str(list_id)+"-"+str(sample), "cond"+str(direction), iteration=milestone, stream=ani.to_html5_video(), file_extension='html')

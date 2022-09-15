@@ -3,22 +3,22 @@ from video_diffusion_pytorch import Unet3D, GaussianDiffusion, Trainer
 
 from clearml import Task
 
-task = Task.init(project_name="t4c_gen", task_name="Train diffusion")
+task = Task.init(project_name="t4c_gen", task_name="Test video diffusion from load")
 logger = task.get_logger()
 args = {
     'im_size': 128,
-    'batch_size': 4,
+    'batch_size': 1,
     'train_lr': 1e-4,
-    'save_sample_every': 5,
+    'save_sample_every': 1,
     'train_steps': 700000,
     'num_workers': 0,
-    'data': '/data/raw/',
+    'data': '../NeurIPS2021-traffic4cast/data/raw/',
     'channels': 1,
     'num_frames': 6,
-    'timesteps': 500,
+    'timesteps': 100,
     'loss_type': 'l2',
     'amp': True,
-    'load_model': None,
+    'load_model': 35,
     'dim': 64,
     'dim_mults': (1,2,4,8),
     'cond': True,
@@ -78,4 +78,5 @@ trainer = Trainer(
 if args['load_model'] is not None:
     trainer.load(args['load_model'])
 
-trainer.train(logger=logger)
+#trainer.train(logger=logger)
+trainer.infer(logger=logger, milestone=args['load_model'])
