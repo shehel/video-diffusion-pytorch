@@ -528,15 +528,13 @@ class Unet3D(nn.Module):
 
         focus_present_mask = default(focus_present_mask, lambda: prob_mask_like((batch,), prob_focus_present, device = device))
         time_rel_pos_bias = self.time_rel_pos_bias(x.shape[2], device = x.device)
-        pdb.set_trace()
         x = self.init_conv(x)
 
         x = self.init_temporal_attn(x, pos_bias = time_rel_pos_bias)
 
         t = self.time_mlp(time) if exists(self.time_mlp) else None
 
-        # classifier free guidance
-
+        # TODO classifier free guidance
         if self.has_cond:
             batch, device = x.shape[0], x.device
             mask = prob_mask_like((batch,), null_cond_prob, device = device)
@@ -559,6 +557,7 @@ class Unet3D(nn.Module):
         x = self.mid_block2(x, t)
 
         for block1, block2, spatial_attn, temporal_attn, upsample in self.ups:
+            pdb.set_trace()
             x = torch.cat((x, h.pop()), dim=1)
             x = block1(x, t)
             x = block2(x, t)
@@ -666,6 +665,9 @@ class GaussianDiffusion(nn.Module):
         )
 
     def q_posterior(self, x_start, x_t, t):
+        '''
+        Compute the mean and variances of the diffusion posterior q(x_{t-1} | x_t, x_0)
+        '''
         posterior_mean = (
             extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
             extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
@@ -675,6 +677,9 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def p_mean_variance(self, x, t, clip_denoised: bool, cond = None, cond_scale = 1.):
+        '''
+        Apply the model to get p(x_{t-1} | x_t, x_0)
+        '''
         x_recon = self.predict_start_from_noise(x, t=t, noise = self.denoise_fn.module.forward_with_cond_scale(x, t, cond = cond, cond_scale = cond_scale))
 
         if clip_denoised:
@@ -703,15 +708,16 @@ class GaussianDiffusion(nn.Module):
         for i in tqdm(reversed(range(0, self.num_timesteps)), desc='sampling loop time step', total=self.num_timesteps):
             img = self.p_sample(img, torch.full((b,), i, device=device, dtype=torch.long), cond = cond, cond_scale = cond_scale)
 
+            # pdb.set_trace()
             img_ = (img + 1) * 0.5 # de-normalize
             #img_ = img
-            grid = make_grid([img_[0,0,0:1,:,:],img_[0,0,1:2,:,:],img_[0,0,2:3,:,:],
-                              img_[0,0,3:4,:,:],img_[0,0,4:5,:,:],img_[0,0,5:,:,:],])
+            grid = make_grid([img_[0,0,0:1,:,:],img_[0,0,1:2,:,:],img_[0,0,2:3,:,:]])
+                              #img_[0,0,3:4,:,:],img_[0,0,4:5,:,:],img_[0,0,5:,:,:],])
 
   
             # display result
             img_g = torchvision.transforms.ToPILImage()(grid)
-            plt.imsave(f'samples/{i}-sample.png', img_g, cmap='viridis',)
+            plt.imsave(f'samples1/{i}-sample.png', img_g, cmap='viridis',)
                        #vmin=0, vmax=1)
 
             #img_g.save(f'samples/{i}-sample.png')
@@ -748,6 +754,8 @@ class GaussianDiffusion(nn.Module):
         return img
 
     def q_sample(self, x_start, t, noise = None):
+
+        # create a pure noise tensor with the same shape as input img batch
         noise = default(noise, lambda: torch.randn_like(x_start))
 
         return (
